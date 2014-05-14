@@ -13,33 +13,41 @@
 
 package com.twitter.hbc.httpclient;
 
-import com.google.common.base.Preconditions;
-import com.twitter.hbc.httpclient.auth.Authentication;
-import org.apache.http.*;
+import java.io.IOException;
+import java.lang.reflect.Constructor;
+import java.util.concurrent.atomic.AtomicReference;
+
+import org.apache.http.HttpHost;
+import org.apache.http.HttpRequest;
+import org.apache.http.HttpResponse;
 import org.apache.http.client.ClientProtocolException;
 import org.apache.http.client.HttpClient;
 import org.apache.http.client.ResponseHandler;
 import org.apache.http.client.methods.HttpUriRequest;
 import org.apache.http.conn.ClientConnectionManager;
+import org.apache.http.conn.scheme.SchemeRegistry;
 import org.apache.http.impl.client.DecompressingHttpClient;
 import org.apache.http.impl.client.DefaultHttpClient;
 import org.apache.http.params.HttpParams;
 import org.apache.http.protocol.HttpContext;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
-import java.io.IOException;
-import java.util.concurrent.atomic.AtomicReference;
+import com.google.common.base.Preconditions;
+import com.twitter.hbc.httpclient.auth.Authentication;
 
 /**
  * There's currently a bug in DecompressingHttpClient that does not allow it to properly abort requests.
  * This class is a hacky workaround to make things work.
  */
 public class RestartableHttpClient implements HttpClient {
-
+  private final static Logger logger = LoggerFactory.getLogger(RestartableHttpClient.class);
+  
   private final AtomicReference<HttpClient> underlying;
   private final Authentication auth;
   private final HttpParams params;
   private final boolean enableGZip;
-  private final ClientConnectionManager connectionManager;
+  private ClientConnectionManager connectionManager;
 
   public RestartableHttpClient(Authentication auth, boolean enableGZip, HttpParams params, ClientConnectionManager connectionManager) {
     this.auth = Preconditions.checkNotNull(auth);
@@ -63,14 +71,27 @@ public class RestartableHttpClient implements HttpClient {
   }
 
   public void restart() {
+    logger.debug("Restarting");
     HttpClient old = underlying.get();
     if (old != null) {
       // this will kill all of the connections and release the resources for our old client
       old.getConnectionManager().shutdown();
+      // ConnectionManager is now dead; rebuild
+      this.connectionManager = rebuildConnectionManager();
     }
     setup();
   }
 
+  protected ClientConnectionManager rebuildConnectionManager() {
+      logger.debug("Rebuilding ClientConnectionManager");
+      try {
+          Constructor<? extends ClientConnectionManager> constructor = connectionManager.getClass().getConstructor(SchemeRegistry.class);
+          return constructor.newInstance(connectionManager.getSchemeRegistry());
+      } catch (Exception e) {
+          throw new RuntimeException(e);
+      }
+  }
+  
   @Override
   public HttpParams getParams() {
     return underlying.get().getParams();
